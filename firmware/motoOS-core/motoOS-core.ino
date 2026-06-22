@@ -59,7 +59,7 @@ bool isIgnOn = false;
 bool isCranking = false;
 bool autoHeatingActive = false;
 bool ecoModeActive = false;            
-bool updateModeActive = false; // پرچم وضعیت آپدیت سیستم
+bool updateModeActive = false; 
 
 unsigned long crankStartTime = 0;
 bool crankLockout = false;
@@ -159,7 +159,7 @@ void wakeUpSystem() {
 // KERNEL BOOT SEQUENCE
 // ====================================================================
 void setup() {
-  wdt_disable(); // در ابتدای بوت سگ نگهبان را موقتاً خاموش می‌کنیم تا لوپ ریست رخ ندهد
+  wdt_disable(); 
   
   Serial.begin(9600); 
   Wire.begin();
@@ -180,9 +180,16 @@ void setup() {
   pinMode(pin_horn, OUTPUT);   digitalWrite(pin_horn, RELAY_OFF);
   pinMode(pin_light, OUTPUT);  digitalWrite(pin_light, RELAY_OFF);
 
-  pinMode(pin_st_k, INPUT); pinMode(pin_rem_unlock, INPUT); pinMode(pin_rem_lock, INPUT);
-  pinMode(pin_rem_heat, INPUT); pinMode(pin_rem_start, INPUT); pinMode(pin_auto_heater_key, INPUT);
-  pinMode(pin_auto_light_key, INPUT); pinMode(pin_learn_key, INPUT); pinMode(pin_touch_master, INPUT);
+  // تغییر تمام پایه‌های کلید ورودی به مد داخلی INPUT_PULLUP
+  pinMode(pin_st_k, INPUT_PULLUP); 
+  pinMode(pin_rem_unlock, INPUT_PULLUP); 
+  pinMode(pin_rem_lock, INPUT_PULLUP);
+  pinMode(pin_rem_heat, INPUT_PULLUP); 
+  pinMode(pin_rem_start, INPUT_PULLUP); 
+  pinMode(pin_auto_heater_key, INPUT_PULLUP);
+  pinMode(pin_auto_light_key, INPUT_PULLUP); 
+  pinMode(pin_learn_key, INPUT_PULLUP); 
+  pinMode(pin_touch_master, INPUT_PULLUP);
 
   throttleServo.attach(pin_servo);
   throttleServo.write(servoMin);
@@ -195,16 +202,15 @@ void setup() {
   delay(800);
   oled.clear();
 
-  wdt_enable(WDTO_4S); // فعال‌سازی سگ نگهبان با مهلت ۴ ثانیه‌ای
+  wdt_enable(WDTO_4S); 
 }
 
 // ====================================================================
 // REAL-TIME OPERATIONS LOOP
 // ====================================================================
 void loop() {
-  wdt_reset(); // غذا دادن به سگ نگهبان (پت کردن) جهت اعلام زنده بودن سیستم
+  wdt_reset(); 
   
-  // اگر در حال آپدیت سخت‌افزاری هستیم، لوپ اصلی را قفل کن
   if (updateModeActive) {
     oled.home();
     oled.println("!!!!!!!!!!!!!!!!!!!!!!");
@@ -219,7 +225,9 @@ void loop() {
   float currentVbat = getBatteryVoltage();
   float currentTemp = getEngineTemp();
 
-  // سیستم حفظ باطری بعد از ۲۸ ساعت قفل ممتد
+  // سنسور کلید اتولایت (PULLUP -> فعال بودن یعنی اتصال به زمین یا همان LOW)
+  bool autoLightKeyActive = (digitalRead(pin_auto_light_key) == LOW);
+
   if (!isIgnOn && !isAuthorized && !ecoModeActive) {
     if (currentMillis - lastActivityTime >= 100800000UL) { 
       ecoModeActive = true;
@@ -228,21 +236,19 @@ void loop() {
     }
   }
 
-  // اتوماسیون چراغ‌ها
   if (welcomeLightActive) {
     if (currentMillis - lightOnStartTime >= 15000UL) { 
       welcomeLightActive = false;
-      if (digitalRead(pin_auto_light_key) == LOW) digitalWrite(pin_light, RELAY_OFF);
+      if (!autoLightKeyActive) digitalWrite(pin_light, RELAY_OFF);
     }
   }
   if (followMeLightActive) {
     if (currentMillis - lightOnStartTime >= 30000UL) { 
       followMeLightActive = false;
-      if (digitalRead(pin_auto_light_key) == LOW) digitalWrite(pin_light, RELAY_OFF);
+      if (!autoLightKeyActive) digitalWrite(pin_light, RELAY_OFF);
     }
   }
 
-  // محافظ ۱۰ دقیقه‌ای مد تعمیرگاه
   if (valetMode && isIgnOn) {
     if (valetEngineStartTime == 0) valetEngineStartTime = currentMillis;
     if (currentMillis - valetEngineStartTime >= 600000UL) { 
@@ -254,7 +260,6 @@ void loop() {
     valetEngineStartTime = 0;
   }
 
-  // قطع‌کن خودکار استارت
   if (isCranking) {
     if (currentVbat > 13.2) stopCranking(); 
     if (currentMillis - crankStartTime > 7000) { 
@@ -263,7 +268,6 @@ void loop() {
   }
   if (crankLockout && (currentMillis - lockoutStartTime > 5000)) crankLockout = false;
 
-  // پردازش پورت سریال (گیرنده دستورات ماژول وای‌فای و آردوینو آپدیتر)
   while (Serial.available() > 0) {
     wakeUpSystem();
     char c = Serial.read();
@@ -274,7 +278,8 @@ void loop() {
       if (bytesRead >= 10 && !valetMode) { 
         tagBuf[10] = '\0';
         
-        if (digitalRead(pin_touch_master) == HIGH) {
+        // کلید ثبت مسترکارت (PULLUP -> فشرده شدن یعنی LOW)
+        if (digitalRead(pin_touch_master) == LOW) {
           strcpy(masterTag, tagBuf); EEPROM.put(EEPROM_ADDR_MASTER, masterTag);
           hasMaster = true; playSound(4); break;
         }
@@ -313,22 +318,17 @@ void loop() {
     else if (c == '\n' || c == '\r') {
       if (serialIndex > 0) {
         serialBuffer[serialIndex] = '\0';
-        
-        // فرمان شروع خط آپدیت از آردوینو دوم
         if(strcmp(serialBuffer, "SYS_UPDATE_START") == 0) {
           updateModeActive = true;
           toggleIgnition(false);
           Serial.println("READY_TO_RECEIVE");
         }
-        // پکت دیتای شبیه‌سازی فریم‌ور جدید برای بازنویسی تنظیمات پایه‌ای EEPROM
         else if(strncmp(serialBuffer, "UP_DATA:", 8) == 0) {
-          // فرمت پکت دریافتی: UP_DATA:MIN_SERVO,MAX_SERVO,LDR_LIMIT
           int sMin, sMax, ldrLim;
           if(sscanf(serialBuffer, "UP_DATA:%d,%d,%d", &sMin, &sMax, &ldrLim) == 3) {
             servoMin = sMin; servoMax = sMax; ldrThreshold = ldrLim;
             Serial.println("UPDATE_SUCCESS_WAIT_RESET");
             delay(2000);
-            // با عمداً غذا ندادن به سگ نگهبان (WDT)، سیستم پس از ۴ ثانیه فوراً هارد ری‌استارت می‌شود!
             while(1); 
           }
         }
@@ -357,24 +357,22 @@ void loop() {
     if (currentMillis - masterFirstSeen < 10000) { adminMode = !adminMode; playSound(adminMode ? 4 : 5); }
   }
 
-  // ورودی ریموت‌های رادیویی
-  if (digitalRead(pin_rem_unlock) == HIGH) { wakeUpSystem(); if(!isAuthorized){ isAuthorized = true; triggerWelcomeLights(); playSound(1); } }
-  if (digitalRead(pin_rem_lock) == HIGH) { wakeUpSystem(); isAuthorized = false; toggleIgnition(false); triggerFollowMeLights(); playSound(2); delay(200); }
+  // فرستنده‌های ریموت رادیویی سخت‌افزاری (PULLUP -> فشرده شدن یعنی LOW)
+  if (digitalRead(pin_rem_unlock) == LOW) { wakeUpSystem(); if(!isAuthorized){ isAuthorized = true; triggerWelcomeLights(); playSound(1); } }
+  if (digitalRead(pin_rem_lock) == LOW) { wakeUpSystem(); isAuthorized = false; toggleIgnition(false); triggerFollowMeLights(); playSound(2); delay(200); }
 
-  // موتور آنالیز پترن مورس دکمه استارت (۲ کوتاه، ۱ بلند، ۳ کوتاه)
-  bool stK = digitalRead(pin_st_k);
+  // انکودر کلید استارت فرمان (PULLUP -> معکوس کردن منطق خوانش کلید جهت حفظ ساختار زمانی مورس)
+  bool stK = (digitalRead(pin_st_k) == LOW);
   
   if (stK && !last_stK) { 
     wakeUpSystem(); stK_pressTime = currentMillis; stK_handled = false; 
   }
-  
   if (morseStep > 0 && (currentMillis - lastMorseTime > 4000)) { morseStep = 0; }
 
   if (stK && !stK_handled && (currentMillis - stK_pressTime >= 3000)) {
     stK_handled = true; 
     if (isAuthorized) { if (!isIgnOn) toggleIgnition(true); startCranking(); }
   }
-  
   if (!stK && last_stK) { 
     stopCranking(); 
     unsigned long clickDuration = currentMillis - stK_pressTime;
@@ -395,8 +393,8 @@ void loop() {
   }
   last_stK = stK;
 
-  // منطق ریموت استارت
-  bool startRem = digitalRead(pin_rem_start);
+  // ریموت کنترل استارت وایرلس (PULLUP -> فشرده شدن یعنی LOW)
+  bool startRem = (digitalRead(pin_rem_start) == LOW);
   if (startRem && !last_startRem) { wakeUpSystem(); startRem_pressTime = currentMillis; startRem_handled = false; }
   if (startRem && !startRem_handled && (currentMillis - startRem_pressTime >= 3000)) {
     startRem_handled = true; if (!isIgnOn) toggleIgnition(true); startCranking();
@@ -404,7 +402,8 @@ void loop() {
   if (!startRem && last_startRem) { stopCranking(); if (!startRem_handled) toggleIgnition(false); }
   last_startRem = startRem;
 
-  bool heatRem = digitalRead(pin_rem_heat);
+  // ریموت کنترل ساسات دستی (PULLUP -> فشرده شدن یعنی LOW)
+  bool heatRem = (digitalRead(pin_rem_heat) == LOW);
   if (heatRem && !last_heatRem) { wakeUpSystem(); heatRem_pressTime = currentMillis; heatRem_handled = false; }
   if (heatRem && !heatRem_handled && (currentMillis - heatRem_pressTime >= 1000)) {
     heatRem_handled = true; if(!valetMode) { autoHeatingActive = false; throttleServo.write(servoMax); }
@@ -415,7 +414,6 @@ void loop() {
   }
   last_heatRem = heatRem;
 
-  // اتو ساسات دمایی حرارتی ۵۵ درجه کارکرد بهینه
   if (autoHeatingActive && isIgnOn && !valetMode) {
     if (currentTemp >= 55.0 || (currentMillis - autoHeatStartTime > 300000UL)) { 
       autoHeatingActive = false; throttleServo.write(servoMin); 
@@ -425,22 +423,24 @@ void loop() {
     }
   }
 
-  // لایت سنسور خودکار خزانه‌داری
-  if (digitalRead(pin_auto_light_key) == HIGH && !welcomeLightActive && !followMeLightActive) {
+  // منطق سنسور نور محیطی و سوییچ اتولایت (PULLUP -> فعال بودن کلید یعنی LOW)
+  if (autoLightKeyActive && !welcomeLightActive && !followMeLightActive) {
     bool turnOnLight = (ldrPolarity == 1) ? (analogRead(pin_ldr) > ldrThreshold) : (analogRead(pin_ldr) < ldrThreshold);
     digitalWrite(pin_light, turnOnLight ? RELAY_ON : RELAY_OFF);
-  } else if (digitalRead(pin_auto_light_key) == LOW && !welcomeLightActive && !followMeLightActive) {
+  } else if (!autoLightKeyActive && !welcomeLightActive && !followMeLightActive) {
     digitalWrite(pin_light, RELAY_OFF);
   }
 
-  // آپدیت مانیتور سیستم و پورت تلمتری سریال
   if (currentMillis - lastTelemetryCheck >= 500 && !ecoModeActive) { 
     lastTelemetryCheck = currentMillis;
     
+    // کلید لِرن کارت (PULLUP -> معکوس کردن منطق خروجی تلمتری جهت صحت اطلاعات وب‌پنل)
+    bool learnKeyActive = (digitalRead(pin_learn_key) == LOW);
+
     Serial.print("BAT:"); Serial.print(currentVbat, 1);
     Serial.print(",TMP:"); Serial.print(currentTemp, 1);
     Serial.print(",IGN:"); Serial.print(isIgnOn);
-    Serial.print(String(",LRN:") + digitalRead(pin_learn_key)); 
+    Serial.print(String(",LRN:") + learnKeyActive); 
     Serial.print(",VAL:"); Serial.print(valetMode);
     Serial.print(",ADM:"); Serial.println(adminMode);
 
@@ -474,7 +474,8 @@ void stopCranking() {
   if (isCranking) {
     isCranking = false;
     digitalWrite(pin_st, RELAY_OFF);
-    if (digitalRead(pin_auto_heater_key) == HIGH && getEngineTemp() < 55.0 && !valetMode) { 
+    // کلید فعالسازی اتوساسات سخت‌افزاری (PULLUP -> فعال بودن یعنی LOW)
+    if (digitalRead(pin_auto_heater_key) == LOW && getEngineTemp() < 55.0 && !valetMode) { 
       autoHeatingActive = true;
       autoHeatStartTime = millis();
     }
