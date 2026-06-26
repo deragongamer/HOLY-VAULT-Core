@@ -3,7 +3,7 @@
 #include <Wire.h>
 #include <SSD1306Ascii.h>
 #include <SSD1306AsciiWire.h>
-#include <avr/wdt.h> // کتابخانه سخت‌افزاری سگ نگهبان برای ری‌استارت خودکار
+#include <avr/wdt.h> 
 
 // ====================================================================
 // HARDWARE PINOUT (HOLY VAULT CORE STANDARD)
@@ -60,12 +60,14 @@ bool isCranking = false;
 bool autoHeatingActive = false;
 bool ecoModeActive = false;            
 bool updateModeActive = false; 
+bool alarmStateActive = false; // فاز دزدگیر فعال
 
 unsigned long crankStartTime = 0;
 bool crankLockout = false;
 unsigned long lockoutStartTime = 0;
 unsigned long autoHeatStartTime = 0;
 unsigned long lastTelemetryCheck = 0;
+unsigned long alarmTriggerTime = 0;
 
 unsigned long masterFirstSeen = 0;
 unsigned long lastMasterSeen = 0;
@@ -85,9 +87,15 @@ unsigned long stK_pressTime = 0;
 bool stK_handled = false;
 uint8_t morseStep = 0; 
 unsigned long lastMorseTime = 0; 
+String morseVisualBuffer = ""; // بافر بصری مورس برای نمایش روی نمایشگر
 
 bool last_startRem = LOW; unsigned long startRem_pressTime = 0; bool startRem_handled = false;
 bool last_heatRem = LOW; unsigned long heatRem_pressTime = 0; bool heatRem_handled = false;
+
+// توابع پیش‌فرض برای کامپایل صحیح
+void toggleIgnition(bool state);
+void stopCranking();
+void startCranking();
 
 // ====================================================================
 // BRUTAL SOUND ENGINE
@@ -147,7 +155,7 @@ void wakeUpSystem() {
   if (ecoModeActive) {
     ecoModeActive = false;
     lastActivityTime = millis();
-    Serial.println("ECO:0"); 
+    Serial.println(F("ECO:0")); 
     oled.begin(&Adafruit128x64, 0x3C);
     oled.setFont(System5x7);
     playSound(6);
@@ -169,10 +177,10 @@ void setup() {
   oled.setFont(System5x7);
   oled.clear();
   
-  oled.println("======================");
-  oled.println("   >> HOLY VAULT <<   ");
-  oled.println("  MOTO-OS KERNEL LOAD ");
-  oled.println("======================");
+  oled.println(F("======================"));
+  oled.println(F("   >> HOLY VAULT <<   "));
+  oled.println(F("  MOTO-OS KERNEL LOAD "));
+  oled.println(F("======================"));
 
   pinMode(pin_buzzer, OUTPUT); noTone(pin_buzzer);
   pinMode(pin_ign, OUTPUT);    digitalWrite(pin_ign, RELAY_OFF);
@@ -213,10 +221,10 @@ void loop() {
   
   if (updateModeActive) {
     oled.home();
-    oled.println("!!!!!!!!!!!!!!!!!!!!!!");
-    oled.println("  SYS UPDATE ACTIVE   ");
-    oled.println("  DO NOT POWER OFF   ");
-    oled.println("!!!!!!!!!!!!!!!!!!!!!!");
+    oled.println(F("!!!!!!!!!!!!!!!!!!!!!!"));
+    oled.println(F("  SYS UPDATE ACTIVE   "));
+    oled.println(F("  DO NOT POWER OFF   "));
+    oled.println(F("!!!!!!!!!!!!!!!!!!!!!!"));
     delay(100);
     return; 
   }
@@ -228,11 +236,43 @@ void loop() {
   // سنسور کلید اتولایت (PULLUP -> فعال بودن یعنی اتصال به زمین یا همان LOW)
   bool autoLightKeyActive = (digitalRead(pin_auto_light_key) == LOW);
 
+  // سیستم مدیریت وضعیت آلارم و دزدگیر جک/لمسی
+  if (!isAuthorized && !isIgnOn) {
+    // اگر قفل است و تاچ بدنه/جک تحریک شود (LOW شود)
+    if (digitalRead(pin_touch_master) == LOW && !alarmStateActive) {
+      alarmStateActive = true;
+      alarmTriggerTime = currentMillis;
+    }
+  } else {
+    alarmStateActive = false;
+    digitalWrite(pin_horn, RELAY_OFF);
+  }
+
+  // اجرای افکت صوتی و نوری دزدگیر در صورت تحریک
+  if (alarmStateActive) {
+    if (currentMillis - alarmTriggerTime < 10000UL) { // ۱۰ ثانیه آلارم وحشی
+      if ((currentMillis / 200) % 2 == 0) {
+        digitalWrite(pin_horn, RELAY_ON);
+        digitalWrite(pin_light, RELAY_ON);
+        tone(pin_buzzer, 3000);
+      } else {
+        digitalWrite(pin_horn, RELAY_OFF);
+        digitalWrite(pin_light, RELAY_OFF);
+        noTone(pin_buzzer);
+      }
+    } else {
+      alarmStateActive = false;
+      digitalWrite(pin_horn, RELAY_OFF);
+      digitalWrite(pin_light, RELAY_OFF);
+      noTone(pin_buzzer);
+    }
+  }
+
   if (!isIgnOn && !isAuthorized && !ecoModeActive) {
     if (currentMillis - lastActivityTime >= 100800000UL) { 
       ecoModeActive = true;
       oled.clear(); 
-      Serial.println("ECO:1"); 
+      Serial.println(F("ECO:1")); 
     }
   }
 
@@ -268,6 +308,7 @@ void loop() {
   }
   if (crankLockout && (currentMillis - lockoutStartTime > 5000)) crankLockout = false;
 
+  // پردازش دستورات ارتباطی پورت سریال
   while (Serial.available() > 0) {
     wakeUpSystem();
     char c = Serial.read();
@@ -279,7 +320,7 @@ void loop() {
         tagBuf[10] = '\0';
         
         // کلید ثبت مسترکارت (PULLUP -> فشرده شدن یعنی LOW)
-        if (digitalRead(pin_touch_master) == LOW) {
+        if (digitalRead(pin_touch_master) == LOW && isAuthorized) {
           strcpy(masterTag, tagBuf); EEPROM.put(EEPROM_ADDR_MASTER, masterTag);
           hasMaster = true; playSound(4); break;
         }
@@ -309,7 +350,7 @@ void loop() {
         } else {
           for (int i=0; i<4; i++) {
             if (strcmp(userTags[i], tagBuf) == 0) {
-              isAuthorized = true; triggerWelcomeLights(); playSound(1); break;
+              isAuthorized = true; alarmStateActive = false; triggerWelcomeLights(); playSound(1); break;
             }
           }
         }
@@ -321,19 +362,19 @@ void loop() {
         if(strcmp(serialBuffer, "SYS_UPDATE_START") == 0) {
           updateModeActive = true;
           toggleIgnition(false);
-          Serial.println("READY_TO_RECEIVE");
+          Serial.println(F("READY_TO_RECEIVE"));
         }
         else if(strncmp(serialBuffer, "UP_DATA:", 8) == 0) {
           int sMin, sMax, ldrLim;
           if(sscanf(serialBuffer, "UP_DATA:%d,%d,%d", &sMin, &sMax, &ldrLim) == 3) {
             servoMin = sMin; servoMax = sMax; ldrThreshold = ldrLim;
-            Serial.println("UPDATE_SUCCESS_WAIT_RESET");
+            Serial.println(F("UPDATE_SUCCESS_WAIT_RESET"));
             delay(2000);
             while(1); 
           }
         }
         else if(strcmp(serialBuffer, "SECURE_PROX_AUTH:77A") == 0 && !isAuthorized) {
-          isAuthorized = true; triggerWelcomeLights(); playSound(1);
+          isAuthorized = true; alarmStateActive = false; triggerWelcomeLights(); playSound(1);
         }
         else if(strcmp(serialBuffer, "SECURE_PROX_LOCK:99X") == 0 && isAuthorized) {
           isAuthorized = false; toggleIgnition(false); triggerFollowMeLights(); playSound(2);
@@ -358,16 +399,16 @@ void loop() {
   }
 
   // فرستنده‌های ریموت رادیویی سخت‌افزاری (PULLUP -> فشرده شدن یعنی LOW)
-  if (digitalRead(pin_rem_unlock) == LOW) { wakeUpSystem(); if(!isAuthorized){ isAuthorized = true; triggerWelcomeLights(); playSound(1); } }
+  if (digitalRead(pin_rem_unlock) == LOW) { wakeUpSystem(); if(!isAuthorized){ isAuthorized = true; alarmStateActive = false; triggerWelcomeLights(); playSound(1); } }
   if (digitalRead(pin_rem_lock) == LOW) { wakeUpSystem(); isAuthorized = false; toggleIgnition(false); triggerFollowMeLights(); playSound(2); delay(200); }
 
-  // انکودر کلید استارت فرمان (PULLUP -> معکوس کردن منطق خوانش کلید جهت حفظ ساختار زمانی مورس)
+  // انکودر کلید استارت فرمان برای سیستم مورس و استارت فیزیکی
   bool stK = (digitalRead(pin_st_k) == LOW);
   
   if (stK && !last_stK) { 
     wakeUpSystem(); stK_pressTime = currentMillis; stK_handled = false; 
   }
-  if (morseStep > 0 && (currentMillis - lastMorseTime > 4000)) { morseStep = 0; }
+  if (morseStep > 0 && (currentMillis - lastMorseTime > 4000)) { morseStep = 0; morseVisualBuffer = ""; }
 
   if (stK && !stK_handled && (currentMillis - stK_pressTime >= 3000)) {
     stK_handled = true; 
@@ -382,12 +423,12 @@ void loop() {
       bool isShort = (clickDuration > 50 && clickDuration < 950);
       bool isLong  = (clickDuration >= 2400 && clickDuration <= 4300);
 
-      if (isShort && (morseStep == 0 || morseStep == 1)) { morseStep++; }
-      else if (isLong && morseStep == 2) { morseStep++; }
+      if (isShort && (morseStep == 0 || morseStep == 1)) { morseStep++; morseVisualBuffer += "* "; }
+      else if (isLong && morseStep == 2) { morseStep++; morseVisualBuffer += "- "; }
       else if (isShort && (morseStep == 3 || morseStep == 4 || morseStep == 5)) {
-        morseStep++;
-        if (morseStep == 6) { isAuthorized = true; triggerWelcomeLights(); playSound(1); morseStep = 0; }
-      } else { morseStep = 0; }
+        morseStep++; morseVisualBuffer += "* ";
+        if (morseStep == 6) { isAuthorized = true; alarmStateActive = false; morseVisualBuffer = ""; triggerWelcomeLights(); playSound(1); morseStep = 0; }
+      } else { morseStep = 0; morseVisualBuffer = "X"; }
     }
     if (!stK_handled && isAuthorized) toggleIgnition(!isIgnOn); 
   }
@@ -431,40 +472,54 @@ void loop() {
     digitalWrite(pin_light, RELAY_OFF);
   }
 
+  // ارسال تلمتری به سرور و نمایش فیدبک‌ها روی مانیتور
   if (currentMillis - lastTelemetryCheck >= 500 && !ecoModeActive) { 
     lastTelemetryCheck = currentMillis;
     
-    // کلید لِرن کارت (PULLUP -> معکوس کردن منطق خروجی تلمتری جهت صحت اطلاعات وب‌پنل)
     bool learnKeyActive = (digitalRead(pin_learn_key) == LOW);
 
-    Serial.print("BAT:"); Serial.print(currentVbat, 1);
-    Serial.print(",TMP:"); Serial.print(currentTemp, 1);
-    Serial.print(",IGN:"); Serial.print(isIgnOn);
-    Serial.print(String(",LRN:") + learnKeyActive); 
-    Serial.print(",VAL:"); Serial.print(valetMode);
-    Serial.print(",ADM:"); Serial.println(adminMode);
+    // ارسال تلمتری بدون ساختن رشته‌های سنگین (بهینه‌سازی جدی RAM)
+    Serial.print(F("BAT:")); Serial.print(currentVbat, 1);
+    Serial.print(F(",TMP:")); Serial.print(currentTemp, 1);
+    Serial.print(F(",IGN:")); Serial.print(isIgnOn);
+    Serial.print(F(",LRN:")); Serial.print(learnKeyActive); 
+    Serial.print(F(",VAL:")); Serial.print(valetMode);
+    Serial.print(F(",ADM:")); Serial.println(adminMode);
 
     oled.home();
-    oled.println("======================");
-    oled.print(" HOLY VAULT : "); oled.print(currentTemp, 1); oled.println(" C  ");
-    oled.print(" DC VOLTAGE : "); oled.print(currentVbat, 1); oled.println(" V  ");
-    oled.println("======================");
+    oled.println(F("======================"));
+    oled.print(F(" HOLY VAULT : ")); oled.print(currentTemp, 1); oled.println(F(" C  "));
+    oled.print(F(" DC VOLTAGE : ")); oled.print(currentVbat, 1); oled.println(F(" V  "));
+    oled.println(F("======================"));
     
-    oled.print("CORE ST: "); 
-    if (valetMode) oled.println("VALET ACTIVE ");
-    else oled.println(adminMode ? "ADMIN CONFIG " : (isAuthorized ? "UNLOCKED     " : "ARMED/LOCKED "));
+    oled.print(F("CORE ST: ")); 
+    if (valetMode) oled.println(F("VALET ACTIVE "));
+    else if (alarmStateActive) oled.println(F("ALARM TRIGGERED"));
+    else oled.println(adminMode ? F("ADMIN CONFIG ") : (isAuthorized ? F("UNLOCKED     ") : F("ARMED/LOCKED ")));
     
-    oled.print("CHOKE  : "); 
-    if (valetMode) oled.println("LOCKED OFF   ");
-    else oled.println(autoHeatingActive ? "ON (AUTO)    " : "OFF          ");
+    oled.print(F("CHOKE  : ")); 
+    if (valetMode) oled.println(F("LOCKED OFF   "));
+    else oled.println(autoHeatingActive ? F("ON (AUTO)    ") : F("OFF          "));
     
-    if (currentTemp > 85.0) { oled.println("!! CRITICAL OVERHEAT !!"); } else { oled.println("                        "); }
+    // نمایش زنده کد مورس در صورت وارد کردن
+    if(morseVisualBuffer != "") {
+      oled.print(F("MORSE  : ")); oled.println(morseVisualBuffer);
+    } else if (currentVbat < 11.0) { 
+      oled.println(F("!! CRITICAL LOW BAT !!")); 
+    } else if (currentTemp > 85.0) { 
+      oled.println(F("!! CRITICAL OVERHEAT !!")); 
+    } else { 
+      oled.println(F("                        ")); 
+    }
   }
 }
 
+// ====================================================================
+// FUNCTIONS IMPLEMENTATION
+// ====================================================================
 void startCranking() {
   if (crankLockout) return;
-  if (getBatteryVoltage() < 11.2) { playSound(3); return; } 
+  if (getBatteryVoltage() < 11.0) { playSound(3); return; } // قفل خودکار استارت در ولتاژ بحرانی
   isCranking = true;
   crankStartTime = millis();
   digitalWrite(pin_st, RELAY_ON);
@@ -474,7 +529,6 @@ void stopCranking() {
   if (isCranking) {
     isCranking = false;
     digitalWrite(pin_st, RELAY_OFF);
-    // کلید فعالسازی اتوساسات سخت‌افزاری (PULLUP -> فعال بودن یعنی LOW)
     if (digitalRead(pin_auto_heater_key) == LOW && getEngineTemp() < 55.0 && !valetMode) { 
       autoHeatingActive = true;
       autoHeatStartTime = millis();
